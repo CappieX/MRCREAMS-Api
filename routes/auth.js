@@ -349,30 +349,110 @@ router.post('/refresh', async (req, res) => {
       });
     }
 
-    // Refresh session
+    let decoded;
+    try {
+      decoded = verifyToken(refreshToken);
+    } catch (jwtError) {
+      if (jwtError.name === 'TokenExpiredError') {
+        return res.status(401).json({
+          error: 'Refresh token expired',
+          code: 'REFRESH_TOKEN_EXPIRED'
+        });
+      }
+      if (jwtError.name === 'JsonWebTokenError') {
+        return res.status(401).json({
+          error: 'Invalid refresh token signature',
+          code: 'INVALID_REFRESH_TOKEN'
+        });
+      }
+      throw jwtError;
+    }
+
+    if (decoded.type !== 'refresh') {
+      return res.status(401).json({
+        error: 'Invalid token type (expected refresh token)',
+        code: 'INVALID_TOKEN_TYPE'
+      });
+    }
+
+    if (!decoded.userId) {
+      return res.status(401).json({
+        error: 'Refresh token missing user identifier',
+        code: 'INVALID_REFRESH_TOKEN'
+      });
+    }
+
+    const userResult = await query(`
+      SELECT u.*, o.name as organization_name, o.code as organization_code
+      FROM users u
+      LEFT JOIN organizations o ON u.organization_id = o.id
+      WHERE u.id = $1 AND u.is_active = true
+    `, [decoded.userId]);
+
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({
+        error: 'User not found or inactive',
+        code: 'USER_NOT_FOUND'
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    if (!user.email_verified) {
+      return res.status(401).json({
+        error: 'Email not verified',
+        code: 'EMAIL_NOT_VERIFIED'
+      });
+    }
+
     const session = await refreshUserSession(refreshToken);
 
-    // Generate new JWT token
-    const decoded = verifyToken(refreshToken);
     const token = generateToken({
-      userId: decoded.userId,
-      email: decoded.email,
-      userType: decoded.userType,
-      organizationId: decoded.organizationId
+      userId: user.id,
+      email: user.email,
+      userType: user.user_type,
+      organizationId: user.organization_id,
+      type: 'session'
     });
 
     res.json({
       message: 'Token refreshed successfully',
       token,
       refreshToken: session.refreshToken,
-      expiresAt: session.expiresAt
+      expiresAt: session.expiresAt,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        userType: user.user_type,
+        organizationId: user.organization_id,
+        organizationName: user.organization_name,
+        organizationCode: user.organization_code,
+        onboardingCompleted: user.onboarding_completed,
+        emailVerified: user.email_verified
+      }
     });
 
   } catch (error) {
     console.error('Token refresh error:', error);
-    res.status(401).json({
-      error: 'Invalid or expired refresh token',
-      code: 'INVALID_REFRESH_TOKEN'
+
+    if (error.message === 'Invalid or expired refresh token') {
+      return res.status(401).json({
+        error: 'Invalid or expired refresh token',
+        code: 'INVALID_REFRESH_TOKEN'
+      });
+    }
+
+    if (error.message === 'User account is not active or verified') {
+      return res.status(401).json({
+        error: 'User account is not active or verified',
+        code: 'ACCOUNT_INACTIVE'
+      });
+    }
+
+    res.status(500).json({
+      error: 'Internal server error during token refresh',
+      code: 'REFRESH_ERROR'
     });
   }
 });
@@ -676,7 +756,29 @@ router.post('/reset-password', async (req, res) => {
  */
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    // Get user metadata
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({
+        error: 'User not authenticated',
+        code: 'AUTH_REQUIRED'
+      });
+    }
+
+    const userResult = await query(`
+      SELECT u.*, o.name as organization_name, o.code as organization_code
+      FROM users u
+      LEFT JOIN organizations o ON u.organization_id = o.id
+      WHERE u.id = $1 AND u.is_active = true
+    `, [req.user.id]);
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        error: 'User not found or inactive',
+        code: 'USER_NOT_FOUND'
+      });
+    }
+
+    const userRow = userResult.rows[0];
+
     const metadataResult = await query(
       'SELECT metadata FROM user_metadata WHERE user_id = $1',
       [req.user.id]
@@ -686,7 +788,22 @@ router.get('/me', authenticateToken, async (req, res) => {
 
     res.json({
       user: {
-        ...req.user,
+        id: userRow.id,
+        email: userRow.email,
+        name: userRow.name,
+        userType: userRow.user_type,
+        organizationId: userRow.organization_id,
+        organizationName: userRow.organization_name,
+        organizationCode: userRow.organization_code,
+        onboardingCompleted: userRow.onboarding_completed,
+        emailVerified: userRow.email_verified,
+        phone: userRow.phone,
+        timezone: userRow.timezone,
+        language: userRow.language,
+        preferences: userRow.preferences,
+        createdAt: userRow.created_at,
+        updatedAt: userRow.updated_at,
+        lastLogin: userRow.last_login,
         metadata
       }
     });
@@ -694,7 +811,7 @@ router.get('/me', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({
-      error: 'Internal server error',
+      error: 'Internal server error while retrieving user',
       code: 'GET_USER_ERROR'
     });
   }
