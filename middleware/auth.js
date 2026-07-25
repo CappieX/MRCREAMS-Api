@@ -41,23 +41,19 @@ const authenticateToken = async (req, res, next) => {
     let userResult;
     try {
       userResult = await query(`
-        SELECT u.id,
-               u.email,
-               u.name,
-               u.user_type,
-               u.organization_id,
-               u.email_verified,
-               u.onboarding_completed,
-               u.created_at,
-               u.updated_at,
-               u.last_login,
-               u.phone,
-               u.timezone,
-               u.language,
-               u.preferences,
-               u.is_active,
-               o.name AS organization_name,
-               o.code AS organization_code
+        SELECT 
+          u.id,
+          u.email,
+          u.name,
+          u.user_type,
+          u.organization_id,
+          u.email_verified,
+          u.onboarding_completed,
+          u.created_at,
+          u.updated_at,
+          u.is_active,
+          o.name AS organization_name,
+          o.code AS organization_code
         FROM users u
         LEFT JOIN organizations o ON u.organization_id = o.id
         WHERE u.id = $1 AND u.is_active = true
@@ -65,21 +61,17 @@ const authenticateToken = async (req, res, next) => {
     } catch (orgJoinErr) {
       console.warn('[authenticateToken] organizations join failed, trying users-only query:', orgJoinErr.message);
       userResult = await query(`
-        SELECT id,
-               email,
-               name,
-               user_type,
-               organization_id,
-               email_verified,
-               onboarding_completed,
-               created_at,
-               updated_at,
-               last_login,
-               phone,
-               timezone,
-               language,
-               preferences,
-               is_active
+        SELECT 
+          id,
+          email,
+          name,
+          user_type,
+          organization_id,
+          email_verified,
+          onboarding_completed,
+          created_at,
+          updated_at,
+          is_active
         FROM users
         WHERE id = $1 AND is_active = true
       `, [decoded.userId]);
@@ -299,23 +291,19 @@ const optionalAuth = async (req, res, next) => {
     let userResult;
     try {
       userResult = await query(`
-        SELECT u.id,
-               u.email,
-               u.name,
-               u.user_type,
-               u.organization_id,
-               u.email_verified,
-               u.onboarding_completed,
-               u.created_at,
-               u.updated_at,
-               u.last_login,
-               u.phone,
-               u.timezone,
-               u.language,
-               u.preferences,
-               u.is_active,
-               o.name AS organization_name,
-               o.code AS organization_code
+        SELECT 
+          u.id,
+          u.email,
+          u.name,
+          u.user_type,
+          u.organization_id,
+          u.email_verified,
+          u.onboarding_completed,
+          u.created_at,
+          u.updated_at,
+          u.is_active,
+          o.name AS organization_name,
+          o.code AS organization_code
         FROM users u
         LEFT JOIN organizations o ON u.organization_id = o.id
         WHERE u.id = $1 AND u.is_active = true
@@ -323,21 +311,17 @@ const optionalAuth = async (req, res, next) => {
     } catch (orgJoinErr) {
       console.warn('[optionalAuth] organizations join failed, trying users-only query:', orgJoinErr.message);
       userResult = await query(`
-        SELECT id,
-               email,
-               name,
-               user_type,
-               organization_id,
-               email_verified,
-               onboarding_completed,
-               created_at,
-               updated_at,
-               last_login,
-               phone,
-               timezone,
-               language,
-               preferences,
-               is_active
+        SELECT 
+          id,
+          email,
+          name,
+          user_type,
+          organization_id,
+          email_verified,
+          onboarding_completed,
+          created_at,
+          updated_at,
+          is_active
         FROM users
         WHERE id = $1 AND is_active = true
       `, [decoded.userId]);
