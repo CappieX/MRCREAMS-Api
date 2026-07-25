@@ -2,30 +2,17 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const pool = require('../db');
+const { query, getClient } = require('../config/database');
+const { authenticateToken } = require('../middleware/auth');
 const auditLogService = require('../services/auditLogService');
 const { sendWelcomeEmail } = require('../services/emailService');
 
 // Secret key for JWT
 const JWT_SECRET = process.env.JWT_SECRET || 'wcreams_secret_key';
 
-// Middleware to verify token
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) return res.status(401).json({ error: 'Access denied' });
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: 'Invalid token' });
-    req.user = user;
-    next();
-  });
-};
-
 // Register a new user (Unified Registration)
 router.post('/register', async (req, res) => {
-  const client = await pool.connect();
+  const client = await getClient();
 
   try {
     await client.query('BEGIN');
@@ -139,7 +126,7 @@ router.post('/login', async (req, res) => {
 
     // Check if user exists
     console.log('🔍 Looking up user in database:', email);
-    const userResult = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const userResult = await query('SELECT * FROM users WHERE email = $1', [email]);
     console.log('👤 User lookup result:', {
       found: userResult.rows.length > 0,
       userCount: userResult.rows.length
@@ -215,7 +202,7 @@ router.post('/login', async (req, res) => {
       // Update user role if different (for professional accounts)
       if (user.user_type !== role) {
         console.log('🔄 Updating user role from', user.user_type, 'to', role);
-        await pool.query('UPDATE users SET user_type = $1 WHERE id = $2', [role, user.id]);
+        await query('UPDATE users SET user_type = $1 WHERE id = $2', [role, user.id]);
         user.user_type = role;
       }
     }
@@ -258,7 +245,7 @@ router.post('/login', async (req, res) => {
 // Verify token
 router.get('/verify', authenticateToken, async (req, res) => {
   try {
-    const userResult = await pool.query(
+    const userResult = await query(
       'SELECT id, email, name, user_type, onboarding_completed, email_verified FROM users WHERE id = $1',
       [req.user.id]
     );
@@ -278,7 +265,7 @@ router.get('/verify', authenticateToken, async (req, res) => {
 // Get current user (with metadata)
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await query(
       `SELECT u.id, u.email, u.name, u.user_type, u.onboarding_completed, u.email_verified,
               um.metadata
        FROM users u
@@ -310,7 +297,7 @@ router.get('/me', authenticateToken, async (req, res) => {
 
 // Update current user profile (supports onboarding progress and completion)
 router.put('/user/profile', authenticateToken, async (req, res) => {
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     const userId = req.user.id;
     const {
@@ -435,7 +422,7 @@ router.post('/professional-login', async (req, res) => {
 
     // Check if user exists
     console.log('🔍 Looking up user in database:', email);
-    const userResult = await pool.query(
+    const userResult = await query(
       'SELECT u.*, um.metadata FROM users u LEFT JOIN user_metadata um ON u.id = um.user_id WHERE u.email = $1',
       [email]
     );
@@ -519,7 +506,7 @@ router.post('/professional-login', async (req, res) => {
       // Update user role if different (for professional accounts)
       if (user.user_type !== role) {
         console.log('🔄 Updating user role from', user.user_type, 'to', role);
-        await pool.query('UPDATE users SET user_type = $1 WHERE id = $2', [role, user.id]);
+        await query('UPDATE users SET user_type = $1 WHERE id = $2', [role, user.id]);
         user.user_type = role;
       }
     }

@@ -1,4 +1,15 @@
-const { verifyToken } = require('../services/authService');
+const jwt = require('jsonwebtoken');
+
+let verifyToken;
+try {
+  const authService = require('../services/authService');
+  verifyToken = authService.verifyToken;
+} catch (importError) {
+  console.warn('[auth.js] authService unavailable, falling back to inline JWT verify:', importError.message);
+  const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
+  verifyToken = (token) => jwt.verify(token, JWT_SECRET);
+}
+
 const { query } = require('../config/database');
 
 /**
@@ -270,10 +281,11 @@ const optionalAuth = async (req, res, next) => {
       organizationCode: user.organization_code,
       onboardingCompleted: user.onboarding_completed,
       emailVerified: user.email_verified,
-      isAdmin: ['super_admin', 'admin', 'it_admin'].includes(user.user_type),
+      isAdmin: ['super_admin', 'admin', 'it_admin', 'platform_admin'].includes(user.user_type),
       isSuperAdmin: user.user_type === 'super_admin',
+      isPlatformAdmin: user.user_type === 'platform_admin',
       isTherapist: user.user_type === 'therapist',
-      isSupport: ['support', 'super_admin', 'admin'].includes(user.user_type)
+      isSupport: ['support', 'super_admin', 'admin', 'platform_admin'].includes(user.user_type)
     };
 
     next();

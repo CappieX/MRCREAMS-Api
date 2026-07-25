@@ -1,0 +1,106 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  username      String    @unique
+  passwordHash  String
+  fullName      String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  conflicts     Conflict[]
+  emotions      Emotion[]
+  preferences   UserPreference?
+  
+  @@map("users")
+}
+
+model UserPreference {
+  id            String    @id @default(cuid())
+  userId        String    @unique
+  user          User      @relation(fields: [userId], references: [id])
+  theme         String    @default("light")
+  colorScheme   String    @default("blue")
+  notifications Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  @@map("user_preferences")
+}
+
+model Conflict {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  
+  title         String
+  description   String?
+  reason        String
+  intensity     Int       @default(5) // 1-10
+  duration      Int       // in minutes
+  resolution    String?
+  resolved      Boolean   @default(false)
+  resolutionTime Int?     // minutes to resolve
+  
+  emotionIds    String[]
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  emotions      Emotion[] @relation("ConflictEmotions")
+  
+  @@map("conflicts")
+}
+
+model Emotion {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id])
+  
+  name          String
+  intensity     Int       @default(5) // 1-10
+  trigger       String?
+  description   String?
+  
+  conflicts     Conflict[] @relation("ConflictEmotions")
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  @@map("emotions")
+}
+
+model Recommendation {
+  id            String    @id @default(cuid())
+  title         String
+  description   String
+  category      String   // "communication", "emotional", "practical"
+  priority      String   // "high", "medium", "low"
+  isActive      Boolean  @default(true)
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@map("recommendations")
+}
+
+model ConflictRecommendation {
+  id              String  @id @default(cuid())
+  conflictId      String
+  recommendationId String
+  isApplied       Boolean @default(false)
+  
+  conflict        Conflict        @relation(fields: [conflictId], references: [id])
+  recommendation  Recommendation  @relation(fields: [recommendationId], references: [id])
+  
+  @@unique([conflictId, recommendationId])
+  @@map("conflict_recommendations")
+}

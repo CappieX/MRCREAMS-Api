@@ -1,4 +1,5 @@
 const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const SecurityService = require('../services/securityService');
 
 /**
@@ -214,50 +215,31 @@ const requestSizeLimit = (maxSize = 1024 * 1024) => { // 1MB default
 
 /**
  * Request frequency limiting middleware
+ * Uses express-rate-limit under the hood for production-grade rate limiting
  */
-const requestFrequencyLimit = (windowMs = 60000, maxRequests = 100) => { // 1 minute, 100 requests
-  const requests = new Map();
-  
-  return (req, res, next) => {
-    const ip = req.ip || req.connection.remoteAddress;
-    const now = Date.now();
-    const windowStart = now - windowMs;
-    
-    // Clean old entries
-    for (const [key, timestamp] of requests.entries()) {
-      if (timestamp < windowStart) {
-        requests.delete(key);
-      }
-    }
-    
-    // Count requests for this IP
-    const ipRequests = Array.from(requests.entries())
-      .filter(([key, timestamp]) => key.startsWith(ip) && timestamp >= windowStart)
-      .length;
-    
-    if (ipRequests >= maxRequests) {
+const requestFrequencyLimit = (windowMs = 60000, maxRequests = 100) => {
+  return rateLimit({
+    windowMs,
+    max: maxRequests,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (req, res) => {
       SecurityService.logSecurityEvent('frequency_limit_exceeded', {
-        ip: ip,
-        requestCount: ipRequests,
-        maxRequests: maxRequests,
-        windowMs: windowMs,
+        ip: req.ip,
+        maxRequests,
+        windowMs,
         endpoint: req.path,
         method: req.method
       }, req);
       
-      return res.status(429).json({
+      res.status(429).json({
         success: false,
         message: 'Too many requests',
         code: 'FREQUENCY_LIMIT_EXCEEDED',
         retryAfter: Math.ceil(windowMs / 1000)
       });
     }
-    
-    // Record this request
-    requests.set(`${ip}-${now}`, now);
-    
-    next();
-  };
+  });
 };
 
 /**
@@ -304,7 +286,9 @@ const httpsEnforcement = (req, res, next) => {
 };
 
 /**
- * CORS security middleware
+ * CORS security middleware (audit-only mode)
+ * Logs CORS policy violations but defers origin enforcement to the cors() library
+ * to ensure preflight OPTIONS requests and credentials mode work correctly.
  */
 const corsSecurity = (req, res, next) => {
   const origin = req.get('Origin');
@@ -317,7 +301,7 @@ const corsSecurity = (req, res, next) => {
     'http://127.0.0.1:5173'
   ];
   const allowedOrigins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : defaultDevOrigins;
-  
+
   if (origin && !allowedOrigins.includes(origin)) {
     SecurityService.logSecurityEvent('cors_violation', {
       origin: origin,
@@ -325,14 +309,8 @@ const corsSecurity = (req, res, next) => {
       endpoint: req.path,
       method: req.method
     }, req);
-    
-    return res.status(403).json({
-      success: false,
-      message: 'CORS policy violation',
-      code: 'CORS_VIOLATION'
-    });
   }
-  
+
   next();
 };
 

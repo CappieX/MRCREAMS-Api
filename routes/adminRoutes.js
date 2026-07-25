@@ -1,14 +1,14 @@
 const express = require('express');
 const router = express.Router();
-const pool = require('../db');
-const { authenticateToken } = require('./authRoutes'); // Kept for backward compatibility if used elsewhere, but ideally should be from middleware/auth
+const { query } = require('../config/database');
+const { authenticateToken } = require('../middleware/auth');
 const { checkPermission } = require('../middleware/rbac');
 const auditLogService = require('../services/auditLogService');
 
 // Get all users (admin only)
 router.get('/users', authenticateToken, checkPermission('read', 'User'), async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await query(
       'SELECT id, name, email, user_type, is_active, created_at FROM users ORDER BY created_at DESC'
     );
     res.json(result.rows);
@@ -24,7 +24,7 @@ router.delete('/users/:id', authenticateToken, checkPermission('delete', 'User')
 
   try {
     // Check if user is admin (prevent deleting admins)
-    const userCheck = await pool.query('SELECT user_type FROM users WHERE id = $1', [userId]);
+    const userCheck = await query('SELECT user_type FROM users WHERE id = $1', [userId]);
     
     if (userCheck.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
@@ -38,7 +38,7 @@ router.delete('/users/:id', authenticateToken, checkPermission('delete', 'User')
     }
 
     // Delete user
-    await pool.query('DELETE FROM users WHERE id = $1', [userId]);
+    await query('DELETE FROM users WHERE id = $1', [userId]);
     
     // Log the deletion
     await auditLogService.logDataDeletion(
@@ -63,16 +63,16 @@ router.delete('/users/:id', authenticateToken, checkPermission('delete', 'User')
 router.get('/stats', authenticateToken, checkPermission('read', 'Report'), async (req, res) => {
   try {
     // Get user counts
-    const userCountResult = await pool.query('SELECT COUNT(*) as total FROM users');
+    const userCountResult = await query('SELECT COUNT(*) as total FROM users');
     
     // Gender not available in users table, removed gender breakdown
-    // const maleCountResult = await pool.query("SELECT COUNT(*) as male FROM users WHERE gender = 'male'");
+    // const maleCountResult = await query("SELECT COUNT(*) as male FROM users WHERE gender = 'male'");
     
     // Get conflict counts
-    const conflictCountResult = await pool.query('SELECT COUNT(*) as total FROM conflicts');
+    const conflictCountResult = await query('SELECT COUNT(*) as total FROM conflicts');
     
     // Get average fight degree
-    const avgFightDegreeResult = await pool.query('SELECT AVG(fight_degree) as average FROM conflicts');
+    const avgFightDegreeResult = await query('SELECT AVG(fight_degree) as average FROM conflicts');
     
     res.json({
       users: {

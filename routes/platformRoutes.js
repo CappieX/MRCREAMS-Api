@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const pool = require('../db');
+const { query } = require('../config/database');
 const { authenticateToken } = require('../middleware/auth'); // Use middleware/auth directly
 const auditLogService = require('../services/auditLogService');
 const featureFlagService = require('../services/featureFlagService');
@@ -30,7 +30,7 @@ router.get('/health', async (req, res) => {
   try {
     // Check DB connection
     const start = Date.now();
-    await pool.query('SELECT 1');
+    await query('SELECT 1');
     const dbLatency = Date.now() - start;
 
     const healthData = {
@@ -187,7 +187,7 @@ router.get('/users', async (req, res) => {
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const orderClause = ['name','email','created_at','user_type','is_active'].includes(sort) ? `ORDER BY ${sort} ${order.toLowerCase() === 'asc' ? 'ASC' : 'DESC'}` : 'ORDER BY created_at DESC';
 
-    const list = await pool.query(
+    const list = await query(
       `SELECT id, name, email, user_type, is_active, created_at 
        FROM users 
        ${whereClause}
@@ -196,7 +196,7 @@ router.get('/users', async (req, res) => {
       [...values, parseInt(limit), parseInt(offset)]
     );
 
-    const count = await pool.query(
+    const count = await query(
       `SELECT COUNT(*) as total FROM users ${whereClause}`,
       values
     );
@@ -214,13 +214,13 @@ router.get('/users', async (req, res) => {
 router.get('/users/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const userRes = await pool.query(
+    const userRes = await query(
       `SELECT id, name, email, user_type, is_active, created_at FROM users WHERE id = $1`,
       [id]
     );
     if (userRes.rows.length === 0) return res.status(404).json({ error: 'User not found' });
 
-    const conflictsRes = await pool.query(
+    const conflictsRes = await query(
       `SELECT id, date, time, conflict_reason, fight_degree, time_consumption, final_result, remark 
        FROM conflicts WHERE user_id = $1 ORDER BY date DESC, time DESC LIMIT 50`,
       [id]
@@ -243,7 +243,7 @@ router.post('/users/bulk-actions', async (req, res) => {
     if (!['activate', 'deactivate'].includes(action)) return res.status(400).json({ error: 'Invalid action' });
 
     const activeValue = action === 'activate';
-    await pool.query(`UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = ANY($2::int[])`, [activeValue, userIds]);
+    await query(`UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = ANY($2::int[])`, [activeValue, userIds]);
 
     await auditLogService.logSystemEvent('USER_BULK_UPDATE', { action, userIds, adminId: req.user.userId || req.user.id });
     res.json({ success: true, message: `Users ${action}d successfully` });
@@ -277,7 +277,7 @@ router.get('/conflicts', async (req, res) => {
     }
 
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    const rows = await pool.query(
+    const rows = await query(
       `SELECT id, user_id, date, time, conflict_reason, fight_degree, time_consumption, final_result 
        FROM conflicts ${whereClause}
        ORDER BY date DESC, time DESC
@@ -294,7 +294,7 @@ router.get('/conflicts', async (req, res) => {
 router.get('/conflicts/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const detail = await pool.query(
+    const detail = await query(
       `SELECT c.*, u.name as user_name, u.email as user_email 
        FROM conflicts c JOIN users u ON c.user_id = u.id WHERE c.id = $1`,
       [id]
@@ -324,7 +324,7 @@ router.post('/conflicts/:id/escalate', async (req, res) => {
 
 router.get('/conflicts/export', async (req, res) => {
   try {
-    const rows = await pool.query(`SELECT id, user_id, date, time, conflict_reason, fight_degree, time_consumption, final_result FROM conflicts ORDER BY date DESC LIMIT 1000`);
+    const rows = await query(`SELECT id, user_id, date, time, conflict_reason, fight_degree, time_consumption, final_result FROM conflicts ORDER BY date DESC LIMIT 1000`);
     const header = 'id,user_id,date,time,conflict_reason,fight_degree,time_consumption,final_result\n';
     const csvBody = rows.rows.map(r => `${r.id},${r.user_id},${r.date},${r.time},"${(r.conflict_reason||'').replace(/"/g,'\"')}",${r.fight_degree},${r.time_consumption},"${(r.final_result||'').replace(/"/g,'\"')}"`).join('\n');
     res.setHeader('Content-Type', 'text/csv');
@@ -341,7 +341,7 @@ router.get('/conflicts/export', async (req, res) => {
 // =============================
 router.get('/professionals/verification-queue', async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await query(
       `SELECT tv.user_id, u.name, u.email, tv.status, tv.license_number, tv.license_state, tv.credentials, tv.reviewed_at
        FROM therapist_verifications tv JOIN users u ON tv.user_id = u.id
        WHERE tv.status = 'pending' ORDER BY tv.reviewed_at DESC NULLS LAST`
@@ -356,7 +356,7 @@ router.get('/professionals/verification-queue', async (req, res) => {
 router.get('/professionals/:id/credentials', async (req, res) => {
   try {
     const { id } = req.params;
-    const result = await pool.query(
+    const result = await query(
       `SELECT tv.*, u.name, u.email FROM therapist_verifications tv JOIN users u ON tv.user_id = u.id WHERE tv.user_id = $1`,
       [id]
     );
@@ -382,7 +382,7 @@ router.get('/professionals/metrics', async (req, res) => {
 router.get('/professionals/availability', async (req, res) => {
   try {
     const { from = new Date().toISOString(), days = 14 } = req.query;
-    const result = await pool.query(
+    const result = await query(
       `SELECT ts.therapist_id, u.name as therapist_name, ts.scheduled_at, ts.status
        FROM therapy_sessions ts JOIN users u ON ts.therapist_id = u.id
        WHERE ts.scheduled_at >= $1 AND ts.scheduled_at < CURRENT_DATE + INTERVAL '${parseInt(days)} days'
@@ -401,7 +401,7 @@ router.get('/professionals/availability', async (req, res) => {
 // =============================
 router.get('/analytics/conflicts-trend', async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await query(
       `SELECT DATE(date) as day, COUNT(*) as count FROM conflicts GROUP BY DATE(date) ORDER BY day DESC LIMIT 30`
     );
     res.json(result.rows);
@@ -413,7 +413,7 @@ router.get('/analytics/conflicts-trend', async (req, res) => {
 
 router.get('/analytics/emotions-heatmap', async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await query(
       `SELECT conflict_reason as category, COUNT(*) as value FROM conflicts GROUP BY conflict_reason`
     );
     res.json(result.rows);
@@ -425,7 +425,7 @@ router.get('/analytics/emotions-heatmap', async (req, res) => {
 
 router.get('/analytics/user-retention', async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await query(
       `SELECT DATE(created_at) as cohort, COUNT(*) as users FROM users GROUP BY DATE(created_at) ORDER BY cohort DESC LIMIT 12`
     );
     res.json(result.rows);
@@ -437,7 +437,7 @@ router.get('/analytics/user-retention', async (req, res) => {
 
 router.get('/analytics/geographic', async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await query(
       `SELECT COALESCE(um.metadata->>'country', 'Unknown') as country, COUNT(*) as users
        FROM user_metadata um GROUP BY COALESCE(um.metadata->>'country','Unknown') ORDER BY users DESC`
     );
@@ -450,7 +450,7 @@ router.get('/analytics/geographic', async (req, res) => {
 
 router.get('/analytics/usage-peaks', async (req, res) => {
   try {
-    const result = await pool.query(
+    const result = await query(
       `SELECT date_part('hour', time::time) as hour, COUNT(*) as count FROM conflicts GROUP BY date_part('hour', time::time) ORDER BY hour`
     );
     res.json(result.rows);
@@ -463,7 +463,7 @@ router.get('/analytics/usage-peaks', async (req, res) => {
 router.get('/analytics/export', async (req, res) => {
   try {
     const { type = 'csv' } = req.query;
-    const data = await pool.query(`SELECT * FROM conflicts ORDER BY date DESC LIMIT 500`);
+    const data = await query(`SELECT * FROM conflicts ORDER BY date DESC LIMIT 500`);
     if (type === 'csv') {
       const cols = Object.keys(data.rows[0] || {});
       const header = cols.join(',') + '\n';
@@ -485,7 +485,7 @@ router.get('/analytics/export', async (req, res) => {
 // =============================
 router.get('/api-keys', async (req, res) => {
   try {
-    const result = await pool.query(`SELECT ak.id, ak.user_id, u.email, ak.key_name, ak.permissions, ak.rate_limit, ak.is_active, ak.created_at, ak.last_used FROM api_keys ak JOIN users u ON ak.user_id = u.id ORDER BY ak.created_at DESC LIMIT 100`);
+    const result = await query(`SELECT ak.id, ak.user_id, u.email, ak.key_name, ak.permissions, ak.rate_limit, ak.is_active, ak.created_at, ak.last_used FROM api_keys ak JOIN users u ON ak.user_id = u.id ORDER BY ak.created_at DESC LIMIT 100`);
     res.json(result.rows.map(r => ({
       id: r.id,
       userId: r.user_id,
@@ -568,7 +568,7 @@ router.post('/backup/trigger', async (req, res) => {
     const encrypted = true;
     const status = 'completed';
 
-    const inserted = await pool.query(
+    const inserted = await query(
       `INSERT INTO database_backups (created_by, destination, size_mb, encrypted, status)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id, created_at AS "createdAt", destination, size_mb AS "sizeMb", encrypted, status`,
@@ -589,7 +589,7 @@ router.post('/backup/trigger', async (req, res) => {
 router.get('/backup/history', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit, 10) || 40;
-    const result = await pool.query(
+    const result = await query(
       `SELECT id,
               created_at AS "createdAt",
               destination,

@@ -2,11 +2,12 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+const compression = require('compression');
 const rateLimit = require('express-rate-limit');
-const { query, getClient } = require('./config/database');
+const { query, getClient, pool } = require('./config/database');
 
-// Import route modules
 const authRouter = require('./routes/auth');
+const authRoutesRouter = require('./routes/authRoutes');
 const adminRouter = require('./routes/adminRoutes');
 const supportTicketsRouter = require('./routes/supportTickets');
 const emotionAnalysisRouter = require('./routes/emotionAnalysis');
@@ -23,70 +24,28 @@ const metricsRouter = require('./routes/metricsRoutes');
 const platformRouter = require('./routes/platformRoutes');
 const paymentRouter = require('./routes/paymentRoutes');
 
-// Import middleware
 const { authenticateToken } = require('./middleware/auth');
-const { configureSecurityHeaders, requestLogging, securityEventLogging, ipSecurity, userAgentValidation, requestSizeLimit, requestFrequencyLimit, httpsEnforcement, corsSecurity, apiVersioning, errorHandling, securityMonitoring } = require('./middleware/security');
+const {
+  configureSecurityHeaders,
+  requestLogging,
+  securityEventLogging,
+  ipSecurity,
+  userAgentValidation,
+  requestSizeLimit,
+  requestFrequencyLimit,
+  httpsEnforcement,
+  corsSecurity,
+  apiVersioning,
+  errorHandling,
+  securityMonitoring
+} = require('./middleware/security');
 const { sanitizeInput, securityValidation, validatePayloadSize } = require('./middleware/validation');
-const SecurityService = require('./services/securityService');
 const monitoringService = require('./services/monitoringService');
 
 const app = express();
-// Default to 5002 for local dev (macOS often has AirPlay/AirTunes bound to :5000).
-// Production/docker can still set PORT=5000 (see docker-compose/nginx).
-const PORT = process.env.PORT || 5002;
+const PORT = parseInt(process.env.PORT, 10) || 5001;
 const isDev = process.env.NODE_ENV !== 'production';
 
-// Security middleware
-app.use(configureSecurityHeaders());
-app.use(requestLogging);
-app.use(securityEventLogging);
-app.use(ipSecurity);
-app.use(userAgentValidation);
-app.use(requestSizeLimit(1024 * 1024));
-app.use(requestFrequencyLimit(60000, isDev ? 1000 : 100));
-app.use(httpsEnforcement);
-app.use(corsSecurity);
-app.use(apiVersioning);
-app.use(securityMonitoring);
-
-// Input validation and sanitization
-app.use(sanitizeInput);
-app.use(securityValidation);
-app.use(validatePayloadSize(1024 * 1024)); // 1MB limit
-
-// Basic security middleware
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      scriptSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "https:"],
-    },
-  },
-}));
-
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: isDev ? 1000 : 100,
-  message: 'Too many requests from this IP, please try again later.',
-  standardHeaders: true,
-  legacyHeaders: false,
-  skip: (req) => isDev && (req.ip === '127.0.0.1' || req.ip === '::1' || req.hostname === 'localhost')
-});
-app.use('/api', limiter);
-
-const authLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: isDev ? 100 : 20,
-  message: 'Too many login attempts. Please try again later.',
-  standardHeaders: true,
-  legacyHeaders: false,
-  skip: (req) => isDev && (req.ip === '127.0.0.1' || req.ip === '::1' || req.hostname === 'localhost')
-});
-
-// CORS configuration
 const allowedOrigins = (process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : [
   process.env.FRONTEND_URL || 'http://localhost:3000',
   'http://127.0.0.1:3000',
@@ -94,42 +53,97 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGIN
   'http://127.0.0.1:3001',
   'http://localhost:5173',
   'http://127.0.0.1:5173'
-]);
+]).filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(null, false);
+    if (isDev) return callback(null, true);
+    return callback(new Error('Origin blocked by CORS policy: ' + origin), false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-API-Key', 'API-Version']
 }));
 
-// Body parsing middleware
+app.use(configureSecurityHeaders());
+app.use(compression({ threshold: 1024 }));
+app.use(httpsEnforcement);
+app.use(corsSecurity);
+app.use(apiVersioning);
+app.use(ipSecurity);
+
+if (!isDev) {
+  app.use(userAgentValidation);
+} else {
+  app.use((req, res, next) => {
+    if (!req.get('User-Agent')) {
+      req.headers['user-agent'] = 'DevClient/1.0';
+    }
+    next();
+  });
+}
+
+app.use(requestLogging);
+app.use(securityEventLogging);
+app.use(securityMonitoring);
+app.use(requestSizeLimit(parseInt(process.env.MAX_REQUEST_SIZE, 10) || 10 * 1024 * 1024));
+app.use(requestFrequencyLimit(
+  parseInt(process.env.RATE_LIMIT_WINDOW, 10) || 60000,
+  isDev ? 5000 : (parseInt(process.env.RATE_LIMIT_MAX, 10) || 100)
+));
+
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false
+}));
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isDev ? 5000 : 100,
+  message: { error: 'Too many requests from this IP, please try again later.', code: 'RATE_LIMIT_EXCEEDED' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use('/api', apiLimiter);
+
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: isDev ? 200 : 20,
+  message: { error: 'Too many login attempts. Please try again later.', code: 'AUTH_RATE_LIMIT_EXCEEDED' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Request logging middleware
+app.use(monitoringService.requestDurationMiddleware.bind(monitoringService));
+
+app.use(sanitizeInput);
+app.use(securityValidation);
+app.use(validatePayloadSize(parseInt(process.env.MAX_REQUEST_SIZE, 10) || 10 * 1024 * 1024));
+
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - ${req.ip}`);
   next();
 });
 
-// Health check endpoint
 app.get('/health', async (req, res) => {
   try {
     await query('SELECT 1');
-    res.json({ 
-      status: 'healthy', 
+    res.json({
+      status: 'healthy',
       timestamp: new Date().toISOString(),
       database: 'connected',
+      uptime: process.uptime(),
+      memory: process.memoryUsage(),
       version: process.env.npm_package_version || '1.0.0'
     });
   } catch (error) {
-    res.status(503).json({ 
-      status: 'unhealthy', 
+    res.status(503).json({
+      status: 'unhealthy',
       timestamp: new Date().toISOString(),
       database: 'disconnected',
       error: error.message
@@ -137,7 +151,6 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Status endpoint summary
 app.get('/status', async (req, res) => {
   try {
     const dbResult = await query('SELECT 1');
@@ -146,7 +159,7 @@ app.get('/status', async (req, res) => {
       environment: process.env.NODE_ENV || 'development',
       backendPort: PORT,
       dbConnected: !!dbResult,
-      allowedOrigins: allowedOrigins,
+      allowedOrigins,
       uptime: process.uptime(),
       version: process.env.npm_package_version || '1.0.0'
     });
@@ -160,10 +173,11 @@ app.get('/status', async (req, res) => {
   }
 });
 
-// API routes
 app.use('/api/auth', authLimiter, authRouter);
+app.use('/api/v1/auth', authLimiter, authRoutesRouter.router);
 app.use('/api/admin', adminRouter);
-// Friendly API root overview instead of "Route not found"
+app.use('/api/v1/admin', adminRouter);
+
 app.get('/api', (req, res) => {
   res.json({
     name: 'MR.CREAMS Backend API',
@@ -184,10 +198,11 @@ app.get('/api', (req, res) => {
       gdpr: '/api/gdpr',
       security: '/api/security',
       platform: '/api/platform',
-      payments: '/api'
+      payments: '/api/payments'
     }
   });
 });
+
 app.use('/api/v1/support', supportTicketsRouter);
 app.use('/api/emotions', emotionAnalysisRouter);
 app.use('/api/therapists', therapistRouter);
@@ -200,13 +215,12 @@ app.use('/api/hipaa', hipaaComplianceRouter);
 app.use('/api/gdpr', gdprComplianceRouter);
 app.use('/api/security', securityRouter);
 app.use('/api/platform', platformRouter);
+app.use('/api/payments', paymentRouter);
 app.use('/api', paymentRouter);
 app.use('/metrics', metricsRouter);
 
-// Protected routes middleware - require valid JWT for private APIs
 const protectRoute = authenticateToken;
 
-// Conflicts API endpoints (migrated to PostgreSQL)
 app.get('/api/conflicts', protectRoute, async (req, res) => {
   try {
     let queryText = `
@@ -216,7 +230,6 @@ app.get('/api/conflicts', protectRoute, async (req, res) => {
     `;
     let params = [];
 
-    // If user is admin, show all conflicts, otherwise only show user's conflicts
     if (req.user && !req.user.isAdmin) {
       queryText += ' WHERE c.user_id = $1';
       params.push(req.user.id);
@@ -243,14 +256,13 @@ app.get('/api/conflicts/:id', protectRoute, async (req, res) => {
     `;
     let params = [id];
 
-    // If not admin, only allow access to own conflicts
     if (req.user && !req.user.isAdmin) {
       queryText += ' AND c.user_id = $2';
       params.push(req.user.id);
     }
 
     const result = await query(queryText, params);
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Conflict not found' });
     }
@@ -266,12 +278,10 @@ app.post('/api/conflicts', protectRoute, async (req, res) => {
   try {
     const { date, time, conflict_reason, description, time_consumption, fight_degree, final_result, remark, partner_id } = req.body;
 
-    // Validate required fields
     if (!date || !time || !conflict_reason || !time_consumption || !fight_degree) {
-      return res.status(400).json({ error: 'Missing required fields' });
+      return res.status(400).json({ error: 'Missing required fields', code: 'MISSING_FIELDS' });
     }
 
-    // Ensure user is authenticated
     if (!req.user || !req.user.id) {
       return res.status(401).json({ error: 'Authentication required' });
     }
@@ -304,7 +314,6 @@ app.put('/api/conflicts/:id', protectRoute, async (req, res) => {
     `;
     let params = [date, time, conflict_reason, description, time_consumption, fight_degree, final_result, remark, partner_id, id];
 
-    // If not admin, only allow updating own conflicts
     if (req.user && !req.user.isAdmin) {
       queryText += ' AND user_id = $11';
       params.push(req.user.id);
@@ -313,7 +322,7 @@ app.put('/api/conflicts/:id', protectRoute, async (req, res) => {
     queryText += ' RETURNING *';
 
     const result = await query(queryText, params);
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Conflict not found or you do not have permission to update it' });
     }
@@ -332,7 +341,6 @@ app.delete('/api/conflicts/:id', protectRoute, async (req, res) => {
     let queryText = 'DELETE FROM conflicts WHERE id = $1';
     let params = [id];
 
-    // If not admin, only allow deleting own conflicts
     if (req.user && !req.user.isAdmin) {
       queryText += ' AND user_id = $2';
       params.push(req.user.id);
@@ -341,7 +349,7 @@ app.delete('/api/conflicts/:id', protectRoute, async (req, res) => {
     queryText += ' RETURNING id';
 
     const result = await query(queryText, params);
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Conflict not found or you do not have permission to delete it' });
     }
@@ -353,23 +361,19 @@ app.delete('/api/conflicts/:id', protectRoute, async (req, res) => {
   }
 });
 
-// Analytics endpoint (enhanced for PostgreSQL)
 app.get('/api/analytics', protectRoute, async (req, res) => {
   try {
     let whereClause = '';
     let params = [];
 
-    // If not admin, only count user's conflicts
     if (req.user && !req.user.isAdmin) {
       whereClause = 'WHERE user_id = $1';
       params.push(req.user.id);
     }
 
-    // Get total conflicts
     const totalResult = await query(`SELECT COUNT(*) FROM conflicts ${whereClause}`, params);
     const totalConflicts = parseInt(totalResult.rows[0].count);
 
-    // Get conflicts by reason
     const reasonQuery = `
       SELECT conflict_reason as name, COUNT(*) as value 
       FROM conflicts 
@@ -379,17 +383,14 @@ app.get('/api/analytics', protectRoute, async (req, res) => {
     `;
     const reasonResult = await query(reasonQuery, params);
 
-    // Get average fight degree
     const avgDegreeQuery = `SELECT AVG(fight_degree) as avg_degree FROM conflicts ${whereClause}`;
     const avgDegreeResult = await query(avgDegreeQuery, params);
     const avgFightDegree = avgDegreeResult.rows[0].avg_degree ? parseFloat(avgDegreeResult.rows[0].avg_degree).toFixed(1) : '0.0';
 
-    // Get average time consumption
     const avgTimeQuery = `SELECT AVG(time_consumption) as avg_time FROM conflicts ${whereClause}`;
     const avgTimeResult = await query(avgTimeQuery, params);
     const avgTimeConsumption = avgTimeResult.rows[0].avg_time ? parseFloat(avgTimeResult.rows[0].avg_time).toFixed(1) : '0.0';
 
-    // Get monthly trends
     const monthlyQuery = `
       SELECT
         TO_CHAR(date, 'YYYY-MM') as month,
@@ -415,10 +416,8 @@ app.get('/api/analytics', protectRoute, async (req, res) => {
   }
 });
 
-// Recommendations endpoint (enhanced)
 app.get('/api/recommendations', async (req, res) => {
   try {
-    // Get most common conflict reasons
     const commonReasonsQuery = `
       SELECT conflict_reason, COUNT(*) as count
       FROM conflicts
@@ -428,7 +427,6 @@ app.get('/api/recommendations', async (req, res) => {
     `;
     const commonReasonsResult = await query(commonReasonsQuery);
 
-    // Get highest fight degree conflicts
     const highIntensityQuery = `
       SELECT * FROM conflicts
       WHERE fight_degree >= 8
@@ -437,7 +435,6 @@ app.get('/api/recommendations', async (req, res) => {
     `;
     const highIntensityResult = await query(highIntensityQuery);
 
-    // Get longest conflicts
     const longConflictsQuery = `
       SELECT * FROM conflicts
       WHERE time_consumption >= 60
@@ -457,45 +454,68 @@ app.get('/api/recommendations', async (req, res) => {
   }
 });
 
-// Error handling middleware
+app.use(errorHandling);
+
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
-  res.status(500).json({ 
-    error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
+  const statusCode = err.statusCode || err.status || 500;
+  res.status(statusCode).json({
+    error: err.clientMessage || (statusCode >= 500 ? 'Internal server error' : err.message) || 'Internal server error',
+    code: err.code || 'INTERNAL_ERROR',
+    ...(isDev && { stack: err.stack })
   });
 });
 
-// 404 handler
 app.use('*', (req, res) => {
-  res.status(404).json({ error: 'Route not found' });
+  res.status(404).json({ error: 'Route not found', code: 'NOT_FOUND', path: req.originalUrl });
 });
 
-// Graceful shutdown
+const closePoolSafe = async () => {
+  try {
+    const { closePool } = require('./config/database');
+    await closePool();
+  } catch (_) {}
+};
+
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully');
-  const { closePool } = require('./config/database');
-  await closePool();
+  await closePoolSafe();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down gracefully');
-  const { closePool } = require('./config/database');
-  await closePool();
+  await closePoolSafe();
   process.exit(0);
 });
 
-// Error handling middleware
-app.use(errorHandling);
-
 module.exports = app;
 
-if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`MR.CREAMS API server running on port ${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-    console.log(`Database: PostgreSQL`);
-    console.log(`Security hardening enabled: ${process.env.NODE_ENV === 'production' ? 'Production' : 'Development'}`);
-  });
+async function bootstrap() {
+  try {
+    console.log('🔌 Checking database connection...');
+    const start = Date.now();
+    await query('SELECT 1 as connection_check');
+    console.log(`✅ PostgreSQL connected (${Date.now() - start}ms)`);
+  } catch (dbErr) {
+    console.warn('⚠️  Database connection check failed:', dbErr.message);
+    console.warn('   Server will still start, but DB-dependent routes will fail until PostgreSQL is ready.');
+  }
+
+  if (require.main === module) {
+    app.listen(PORT, () => {
+      console.log(`🚀 MR.CREAMS API server running on port ${PORT}`);
+      console.log(`   Environment : ${process.env.NODE_ENV || 'development'}`);
+      console.log(`   Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:3000'}`);
+      console.log(`   Allowed CORS: ${allowedOrigins.join(', ')}`);
+      console.log(`   Health check : http://localhost:${PORT}/health`);
+      console.log(`   Status       : http://localhost:${PORT}/status`);
+      console.log(`   API Root     : http://localhost:${PORT}/api`);
+    });
+  }
 }
+
+bootstrap().catch((err) => {
+  console.error('💥 Bootstrap failed:', err);
+  if (require.main === module) process.exit(1);
+});

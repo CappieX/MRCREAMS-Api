@@ -4,9 +4,9 @@ const crypto = require('crypto');
 const { query, getClient } = require('../config/database');
 const validator = require('validator');
 
-// JWT configuration
+// JWT configuration (supports both JWT_EXPIRE and JWT_EXPIRES_IN for backward compatibility)
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this-in-production';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || process.env.JWT_EXPIRE || '24h';
 const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS) || 12;
 
@@ -359,5 +359,15 @@ module.exports = {
   generateEmailVerificationToken,
   generatePasswordResetToken,
   generateMFASecret,
-  generateMFABackupCodes
+  generateMFABackupCodes,
+  signToken: (userId, email, type = 'session', extraPayload = {}) =>
+    generateToken({ userId, email, type, ...extraPayload }),
+  refreshToken: (token) => {
+    const decoded = verifyToken(token);
+    return generateToken({
+      userId: decoded.userId,
+      email: decoded.email,
+      type: 'session'
+    });
+  }
 };
