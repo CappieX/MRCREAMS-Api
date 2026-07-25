@@ -31,20 +31,59 @@ const authenticateToken = async (req, res, next) => {
     // Verify token
     const decoded = verifyToken(token);
     
-    if (decoded.type !== 'session') {
+    if (decoded.type && decoded.type !== 'session') {
       return res.status(401).json({ 
         error: 'Invalid token type',
         code: 'INVALID_TOKEN_TYPE'
       });
     }
 
-    // Get user from database
-    const userResult = await query(`
-      SELECT u.*, o.name as organization_name, o.code as organization_code
-      FROM users u
-      LEFT JOIN organizations o ON u.organization_id = o.id
-      WHERE u.id = $1 AND u.is_active = true
-    `, [decoded.userId]);
+    let userResult;
+    try {
+      userResult = await query(`
+        SELECT u.id,
+               u.email,
+               u.name,
+               u.user_type,
+               u.organization_id,
+               u.email_verified,
+               u.onboarding_completed,
+               u.created_at,
+               u.updated_at,
+               u.last_login,
+               u.phone,
+               u.timezone,
+               u.language,
+               u.preferences,
+               u.is_active,
+               o.name AS organization_name,
+               o.code AS organization_code
+        FROM users u
+        LEFT JOIN organizations o ON u.organization_id = o.id
+        WHERE u.id = $1 AND u.is_active = true
+      `, [decoded.userId]);
+    } catch (orgJoinErr) {
+      console.warn('[authenticateToken] organizations join failed, trying users-only query:', orgJoinErr.message);
+      userResult = await query(`
+        SELECT id,
+               email,
+               name,
+               user_type,
+               organization_id,
+               email_verified,
+               onboarding_completed,
+               created_at,
+               updated_at,
+               last_login,
+               phone,
+               timezone,
+               language,
+               preferences,
+               is_active
+        FROM users
+        WHERE id = $1 AND is_active = true
+      `, [decoded.userId]);
+    }
 
     if (userResult.rows.length === 0) {
       return res.status(401).json({ 
@@ -55,17 +94,18 @@ const authenticateToken = async (req, res, next) => {
 
     const user = userResult.rows[0];
 
-    // Attach user to request
+    req.userRaw = user;
+
     req.user = {
       id: user.id,
       email: user.email,
       name: user.name,
       userType: user.user_type,
       organizationId: user.organization_id,
-      organizationName: user.organization_name,
-      organizationCode: user.organization_code,
-      onboardingCompleted: user.onboarding_completed,
-      emailVerified: user.email_verified,
+      organizationName: user.organization_name || null,
+      organizationCode: user.organization_code || null,
+      onboardingCompleted: !!user.onboarding_completed,
+      emailVerified: !!user.email_verified,
       isAdmin: ['super_admin', 'admin', 'it_admin', 'platform_admin'].includes(user.user_type),
       isSuperAdmin: user.user_type === 'super_admin',
       isPlatformAdmin: user.user_type === 'platform_admin',
@@ -244,43 +284,85 @@ const optionalAuth = async (req, res, next) => {
 
     if (!token) {
       req.user = null;
+      req.userRaw = null;
       return next();
     }
 
-    // Verify token
     const decoded = verifyToken(token);
     
-    if (decoded.type !== 'session') {
+    if (decoded.type && decoded.type !== 'session') {
       req.user = null;
+      req.userRaw = null;
       return next();
     }
 
-    // Get user from database
-    const userResult = await query(`
-      SELECT u.*, o.name as organization_name, o.code as organization_code
-      FROM users u
-      LEFT JOIN organizations o ON u.organization_id = o.id
-      WHERE u.id = $1 AND u.is_active = true
-    `, [decoded.userId]);
+    let userResult;
+    try {
+      userResult = await query(`
+        SELECT u.id,
+               u.email,
+               u.name,
+               u.user_type,
+               u.organization_id,
+               u.email_verified,
+               u.onboarding_completed,
+               u.created_at,
+               u.updated_at,
+               u.last_login,
+               u.phone,
+               u.timezone,
+               u.language,
+               u.preferences,
+               u.is_active,
+               o.name AS organization_name,
+               o.code AS organization_code
+        FROM users u
+        LEFT JOIN organizations o ON u.organization_id = o.id
+        WHERE u.id = $1 AND u.is_active = true
+      `, [decoded.userId]);
+    } catch (orgJoinErr) {
+      console.warn('[optionalAuth] organizations join failed, trying users-only query:', orgJoinErr.message);
+      userResult = await query(`
+        SELECT id,
+               email,
+               name,
+               user_type,
+               organization_id,
+               email_verified,
+               onboarding_completed,
+               created_at,
+               updated_at,
+               last_login,
+               phone,
+               timezone,
+               language,
+               preferences,
+               is_active
+        FROM users
+        WHERE id = $1 AND is_active = true
+      `, [decoded.userId]);
+    }
 
     if (userResult.rows.length === 0) {
       req.user = null;
+      req.userRaw = null;
       return next();
     }
 
     const user = userResult.rows[0];
 
-    // Attach user to request
+    req.userRaw = user;
+
     req.user = {
       id: user.id,
       email: user.email,
       name: user.name,
       userType: user.user_type,
       organizationId: user.organization_id,
-      organizationName: user.organization_name,
-      organizationCode: user.organization_code,
-      onboardingCompleted: user.onboarding_completed,
-      emailVerified: user.email_verified,
+      organizationName: user.organization_name || null,
+      organizationCode: user.organization_code || null,
+      onboardingCompleted: !!user.onboarding_completed,
+      emailVerified: !!user.email_verified,
       isAdmin: ['super_admin', 'admin', 'it_admin', 'platform_admin'].includes(user.user_type),
       isSuperAdmin: user.user_type === 'super_admin',
       isPlatformAdmin: user.user_type === 'platform_admin',
@@ -290,8 +372,9 @@ const optionalAuth = async (req, res, next) => {
 
     next();
   } catch (error) {
-    // If token verification fails, just set user to null
+    console.warn('[optionalAuth] Optional auth failed, treating as guest:', error.message);
     req.user = null;
+    req.userRaw = null;
     next();
   }
 };

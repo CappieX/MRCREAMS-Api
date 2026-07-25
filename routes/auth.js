@@ -205,7 +205,12 @@ router.post('/login', async (req, res) => {
     const session = await createUserSession(
       user.id,
       req.ip,
-      req.get('User-Agent')
+      req.get('User-Agent'),
+      {
+        email: user.email,
+        userType: user.user_type,
+        organizationId: user.organization_id
+      }
     );
 
     res.json({
@@ -295,12 +300,17 @@ router.post('/professional-login', async (req, res) => {
       userId: user.id,
       email: user.email,
       userType: user.user_type,
-      organizationId: user.organization_id
+      organizationId: user.organization_id,
+      type: 'session'
     });
 
     let session;
     try {
-      session = await createUserSession(user.id, req.ip, req.get('User-Agent'));
+      session = await createUserSession(user.id, req.ip, req.get('User-Agent'), {
+        email: user.email,
+        userType: user.user_type,
+        organizationId: user.organization_id
+      });
     } catch (sessionError) {
       console.error('Session creation failed during professional login:', sessionError);
       session = {
@@ -755,67 +765,171 @@ router.post('/reset-password', async (req, res) => {
  * @access Private
  */
 router.get('/me', authenticateToken, async (req, res) => {
+  const userId = req.user && req.user.id;
+  const isDev = process.env.NODE_ENV !== 'production';
+
+  console.log(`🔍 /me -> START | userId=${userId} | hasUserRaw=${!!req.userRaw}`);
+
+  if (!userId) {
+    console.log('❌ /me -> AUTH_REQUIRED: no req.user.id');
+    return res.status(401).json({
+      error: 'User not authenticated',
+      code: 'AUTH_REQUIRED'
+    });
+  }
+
+  let userRow = null;
+  let fallbackUsed = false;
+  let fallbackReason = null;
+
   try {
-    if (!req.user || !req.user.id) {
-      return res.status(401).json({
-        error: 'User not authenticated',
-        code: 'AUTH_REQUIRED'
-      });
+    userRow = await fetchCurrentUser(userId);
+    console.log(`🔍 /me -> DB lookup OK | id=${userRow.id} email=${userRow.email}`);
+  } catch (dbErr) {
+    console.warn(`🔍 /me -> DB lookup FAILED: ${dbErr.message}`);
+    if (req.userRaw) {
+      console.warn('🔍 /me -> FALLBACK to req.userRaw from authenticateToken');
+      userRow = req.userRaw;
+      fallbackUsed = true;
+      fallbackReason = dbErr.message;
+    } else {
+      console.warn('🔍 /me -> FALLBACK to req.user shape');
+      userRow = {
+        id: req.user.id,
+        email: req.user.email,
+        name: req.user.name,
+        user_type: req.user.userType,
+        organization_id: req.user.organizationId,
+        organization_name: req.user.organizationName,
+        organization_code: req.user.organizationCode,
+        onboarding_completed: req.user.onboardingCompleted,
+        email_verified: req.user.emailVerified
+      };
+      fallbackUsed = true;
+      fallbackReason = dbErr.message;
     }
+  }
 
-    const userResult = await query(`
-      SELECT u.*, o.name as organization_name, o.code as organization_code
-      FROM users u
-      LEFT JOIN organizations o ON u.organization_id = o.id
-      WHERE u.id = $1 AND u.is_active = true
-    `, [req.user.id]);
-
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({
-        error: 'User not found or inactive',
-        code: 'USER_NOT_FOUND'
-      });
-    }
-
-    const userRow = userResult.rows[0];
-
+  let metadata = {};
+  try {
     const metadataResult = await query(
       'SELECT metadata FROM user_metadata WHERE user_id = $1',
-      [req.user.id]
+      [userId]
     );
+    if (metadataResult.rows.length > 0 && metadataResult.rows[0].metadata) {
+      metadata = metadataResult.rows[0].metadata;
+    }
+  } catch (metaErr) {
+    console.warn(`🔍 /me -> user_metadata SKIPPED: ${metaErr.message}`);
+    metadata = {};
+  }
 
-    const metadata = metadataResult.rows.length > 0 ? metadataResult.rows[0].metadata : {};
-
-    res.json({
+  try {
+    const responsePayload = {
       user: {
-        id: userRow.id,
-        email: userRow.email,
-        name: userRow.name,
-        userType: userRow.user_type,
-        organizationId: userRow.organization_id,
-        organizationName: userRow.organization_name,
-        organizationCode: userRow.organization_code,
-        onboardingCompleted: userRow.onboarding_completed,
-        emailVerified: userRow.email_verified,
-        phone: userRow.phone,
-        timezone: userRow.timezone,
-        language: userRow.language,
-        preferences: userRow.preferences,
-        createdAt: userRow.created_at,
-        updatedAt: userRow.updated_at,
-        lastLogin: userRow.last_login,
+        id: pickField(userRow, 'id'),
+        email: pickField(userRow, 'email'),
+        name: pickField(userRow, 'name'),
+        userType: pickField(userRow, 'user_type', 'userType'),
+        organizationId: pickField(userRow, 'organization_id', 'organizationId'),
+        organizationName: pickField(userRow, 'organization_name', 'organizationName') || null,
+        organizationCode: pickField(userRow, 'organization_code', 'organizationCode') || null,
+        emailVerified: !!pickField(userRow, 'email_verified', 'emailVerified'),
+        onboardingCompleted: !!pickField(userRow, 'onboarding_completed', 'onboardingCompleted'),
+        createdAt: pickField(userRow, 'created_at', 'createdAt') || null,
+        updatedAt: pickField(userRow, 'updated_at', 'updatedAt') || null,
+        lastLogin: pickField(userRow, 'last_login', 'lastLogin') || null,
+        phone: pickField(userRow, 'phone') || null,
+        timezone: pickField(userRow, 'timezone') || null,
+        language: pickField(userRow, 'language') || null,
+        preferences: pickField(userRow, 'preferences') || {},
         metadata
       }
-    });
+    };
 
-  } catch (error) {
-    console.error('Get user error:', error);
-    res.status(500).json({
+    if (fallbackUsed && isDev) {
+      responsePayload.fallback = true;
+      responsePayload.fallbackReason = fallbackReason;
+    }
+
+    console.log(`🔍 /me -> SUCCESS${fallbackUsed ? ' (FALLBACK)' : ''}`);
+    return res.json(responsePayload);
+
+  } catch (buildErr) {
+    console.error('❌ Get user error: response build failed', buildErr);
+    console.error('❌ Get user error: userRow keys =', Object.keys(userRow || {}));
+    return res.status(500).json({
       error: 'Internal server error while retrieving user',
-      code: 'GET_USER_ERROR'
+      code: 'GET_USER_ERROR',
+      ...(isDev && { debug: buildErr.message, fallbackUsed, fallbackReason })
     });
   }
 });
+
+function pickField(obj, snakeKey, camelKey) {
+  if (!obj) return undefined;
+  if (camelKey && obj[camelKey] !== undefined && obj[camelKey] !== null) {
+    return obj[camelKey];
+  }
+  if (obj[snakeKey] !== undefined && obj[snakeKey] !== null) {
+    return obj[snakeKey];
+  }
+  return undefined;
+}
+
+async function fetchCurrentUser(userId) {
+  let userResult;
+  try {
+    userResult = await query(`
+      SELECT u.id,
+             u.email,
+             u.name,
+             u.user_type,
+             u.organization_id,
+             u.email_verified,
+             u.onboarding_completed,
+             u.created_at,
+             u.updated_at,
+             u.last_login,
+             u.phone,
+             u.timezone,
+             u.language,
+             u.preferences,
+             o.name AS organization_name,
+             o.code AS organization_code
+      FROM users u
+      LEFT JOIN organizations o ON u.organization_id = o.id
+      WHERE u.id = $1 AND u.is_active = true
+    `, [userId]);
+  } catch (orgJoinErr) {
+    console.warn(`🔍 /me -> orgs join failed, trying users-only query: ${orgJoinErr.message}`);
+    userResult = await query(`
+      SELECT id,
+             email,
+             name,
+             user_type,
+             organization_id,
+             email_verified,
+             onboarding_completed,
+             created_at,
+             updated_at,
+             last_login,
+             phone,
+             timezone,
+             language,
+             preferences
+      FROM users
+      WHERE id = $1 AND is_active = true
+    `, [userId]);
+  }
+
+  if (!userResult || userResult.rows.length === 0) {
+    const err = new Error('User not found or inactive');
+    err.code = 'USER_NOT_FOUND';
+    throw err;
+  }
+  return userResult.rows[0];
+}
 
 /**
  * @route PUT /api/auth/profile
@@ -895,23 +1009,34 @@ router.put('/profile', authenticateToken, auditLog('profile_update', 'users'), a
     if (onboardingCompletedAt) metadataUpdates.onboarding_completed_at = onboardingCompletedAt;
 
     if (Object.keys(metadataUpdates).length > 0) {
-      const existingMeta = await query(
-        'SELECT metadata FROM user_metadata WHERE user_id = $1',
-        [req.user.id]
-      );
-      const currentMeta = existingMeta.rows.length > 0 ? existingMeta.rows[0].metadata || {} : {};
+      let existingMetaRows = [];
+      try {
+        const existingMeta = await query(
+          'SELECT metadata FROM user_metadata WHERE user_id = $1',
+          [req.user.id]
+        );
+        existingMetaRows = existingMeta.rows;
+      } catch (lookupErr) {
+        console.warn('[auth/profile] user_metadata lookup failed; attempting CREATE (table may be new):', lookupErr.message);
+      }
+
+      const currentMeta = existingMetaRows.length > 0 ? (existingMetaRows[0].metadata || {}) : {};
       const newMeta = { ...currentMeta, ...metadataUpdates };
 
-      if (existingMeta.rows.length > 0) {
+      if (existingMetaRows.length > 0) {
         await query(
           'UPDATE user_metadata SET metadata = $1, updated_at = NOW() WHERE user_id = $2',
           [JSON.stringify(newMeta), req.user.id]
         );
       } else {
-        await query(
-          'INSERT INTO user_metadata (user_id, metadata, updated_at) VALUES ($1, $2, NOW())',
-          [req.user.id, JSON.stringify(newMeta)]
-        );
+        try {
+          await query(
+            'INSERT INTO user_metadata (user_id, metadata, updated_at) VALUES ($1, $2, NOW())',
+            [req.user.id, JSON.stringify(newMeta)]
+          );
+        } catch (insertErr) {
+          console.warn('[auth/profile] user_metadata INSERT skipped (table missing?):', insertErr.message);
+        }
       }
     }
 

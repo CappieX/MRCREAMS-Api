@@ -148,27 +148,37 @@ const calculatePasswordStrength = (password) => {
  * @param {string} userId - User ID
  * @param {string} ipAddress - Client IP address
  * @param {string} userAgent - Client user agent
+ * @param {Object} [userContext] - Optional user context to embed in session token
+ * @param {string} [userContext.email] - User email
+ * @param {string} [userContext.userType] - User role / type
+ * @param {string|number|null} [userContext.organizationId] - Organization id
  * @returns {Object} Session data
  */
-const createUserSession = async (userId, ipAddress, userAgent) => {
+const createUserSession = async (userId, ipAddress, userAgent, userContext = {}) => {
   const client = await getClient();
   
   try {
-    const sessionToken = generateToken({ userId, type: 'session' }, '24h');
+    const payload = {
+      userId,
+      type: 'session',
+      ...(userContext.email ? { email: userContext.email } : {}),
+      ...(userContext.userType ? { userType: userContext.userType } : {}),
+      ...(userContext.organizationId !== undefined && userContext.organizationId !== null
+        ? { organizationId: userContext.organizationId }
+        : {})
+    };
+    const sessionToken = generateToken(payload, '24h');
     const refreshToken = generateRefreshToken(userId);
     
-    // Calculate expiration time
     const expiresAt = new Date();
     expiresAt.setHours(expiresAt.getHours() + 24);
     
-    // Store session in database
     await client.query(`
       INSERT INTO user_sessions (user_id, session_token, refresh_token, expires_at, ip_address, user_agent)
       VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING id
     `, [userId, sessionToken, refreshToken, expiresAt, ipAddress, userAgent]);
     
-    // Update user's last login
     await client.query(`
       UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1
     `, [userId]);
@@ -192,16 +202,14 @@ const refreshUserSession = async (refreshToken) => {
   const client = await getClient();
   
   try {
-    // Verify refresh token
     const decoded = verifyToken(refreshToken);
     
     if (decoded.type !== 'refresh') {
       throw new Error('Invalid token type');
     }
     
-    // Check if session exists and is active
     const sessionResult = await client.query(`
-      SELECT us.*, u.is_active, u.email_verified
+      SELECT us.*, u.is_active, u.email_verified, u.email, u.user_type, u.organization_id
       FROM user_sessions us
       JOIN users u ON us.user_id = u.id
       WHERE us.refresh_token = $1 AND us.is_active = true AND us.expires_at > CURRENT_TIMESTAMP
@@ -217,14 +225,21 @@ const refreshUserSession = async (refreshToken) => {
       throw new Error('User account is not active or verified');
     }
     
-    // Generate new tokens
-    const newSessionToken = generateToken({ userId: session.user_id, type: 'session' }, '24h');
+    const newSessionPayload = {
+      userId: session.user_id,
+      type: 'session',
+      email: session.email,
+      userType: session.user_type,
+      ...(session.organization_id !== undefined && session.organization_id !== null
+        ? { organizationId: session.organization_id }
+        : {})
+    };
+    const newSessionToken = generateToken(newSessionPayload, '24h');
     const newRefreshToken = generateRefreshToken(session.user_id);
     
     const newExpiresAt = new Date();
     newExpiresAt.setHours(newExpiresAt.getHours() + 24);
     
-    // Update session
     await client.query(`
       UPDATE user_sessions 
       SET session_token = $1, refresh_token = $2, expires_at = $3, updated_at = CURRENT_TIMESTAMP
@@ -234,7 +249,8 @@ const refreshUserSession = async (refreshToken) => {
     return {
       sessionToken: newSessionToken,
       refreshToken: newRefreshToken,
-      expiresAt: newExpiresAt
+      expiresAt: newExpiresAt,
+      userId: session.user_id
     };
   } finally {
     client.release();
@@ -364,9 +380,14 @@ module.exports = {
     generateToken({ userId, email, type, ...extraPayload }),
   refreshToken: (token) => {
     const decoded = verifyToken(token);
+    if (!decoded.userId) {
+      throw new Error('Invalid token payload for refresh');
+    }
     return generateToken({
       userId: decoded.userId,
       email: decoded.email,
+      userType: decoded.userType,
+      organizationId: decoded.organizationId,
       type: 'session'
     });
   }
