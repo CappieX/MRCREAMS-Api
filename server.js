@@ -55,6 +55,8 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGIN
   'http://127.0.0.1:5173'
 ]).filter(Boolean);
 
+app.set('trust proxy', 1); // Trust first proxy
+
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin) return callback(null, true);
